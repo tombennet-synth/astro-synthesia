@@ -1,0 +1,108 @@
+---
+import manifest from "virtual:astro-synthesia/manifest";
+import { computeVideoHash } from "./lib/hash.ts";
+
+interface Props {
+  scriptText: string;
+  avatar: string;
+  background?: string;
+  aspectRatio?: "16:9" | "9:16" | "1:1" | "4:5" | "5:4";
+  title?: string;
+}
+
+const {
+  scriptText,
+  avatar,
+  background = "off_white",
+  aspectRatio = "16:9",
+  title,
+} = Astro.props;
+
+const hash = computeVideoHash({ scriptText, avatar, background, aspectRatio });
+const entry = manifest[hash];
+
+const isComplete = entry?.status === "complete";
+const isInProgress = entry?.status === "in_progress";
+const embedUrl = entry?.videoId
+  ? `https://share.synthesia.io/embeds/videos/${entry.videoId}`
+  : null;
+const thumbnailUrl = entry?.thumbnailUrl;
+---
+
+{isComplete && embedUrl ? (
+  <div class="synthesia-video">
+    <iframe
+      src={embedUrl}
+      loading="lazy"
+      title={`Synthesia video player - ${title ?? "Video"}`}
+      allowfullscreen
+      allow="encrypted-media; fullscreen; microphone;"
+    ></iframe>
+  </div>
+) : isInProgress ? (
+  <div class="synthesia-video synthesia-video--pending">
+    {thumbnailUrl && <img src={thumbnailUrl} alt="" />}
+    <div class="synthesia-video__overlay">
+      <p>Video is being generated. Check back soon.</p>
+    </div>
+  </div>
+) : (
+  <div class="synthesia-video synthesia-video--draft">
+    <p><strong>Video</strong> — not yet provisioned</p>
+    <details>
+      <summary>Script preview</summary>
+      <p>{scriptText}</p>
+    </details>
+  </div>
+)}
+
+<style>
+  .synthesia-video {
+    position: relative;
+    overflow: hidden;
+    padding-top: 56.25%;
+    margin: 1.5em 0;
+    border-radius: 8px;
+    background: #e5e7f0;
+  }
+
+  .synthesia-video iframe {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    top: 0;
+    left: 0;
+    border: none;
+    padding: 0;
+    margin: 0;
+    overflow: hidden;
+  }
+
+  .synthesia-video--pending,
+  .synthesia-video--draft {
+    height: auto;
+    padding: 2em;
+    text-align: center;
+    color: #222939;
+  }
+
+  .synthesia-video--pending img {
+    max-width: 100%;
+    border-radius: 4px;
+    margin-bottom: 1em;
+  }
+
+  .synthesia-video__overlay p {
+    margin: 0;
+    font-style: italic;
+  }
+
+  .synthesia-video--draft details {
+    margin-top: 1em;
+    text-align: left;
+  }
+
+  .synthesia-video--draft summary {
+    cursor: pointer;
+  }
+</style>

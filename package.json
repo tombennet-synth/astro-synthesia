@@ -1,0 +1,39 @@
+{
+  "name": "astro-synthesia",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Astro integration for embedding Synthesia AI-generated videos in MDX content",
+  "author": "Tom Bennet",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tombennet/astro-synthesia"
+  },
+  "exports": {
+    ".": "./src/integration.ts",
+    "./SynthesiaVideo.astro": "./src/SynthesiaVideo.astro"
+  },
+  "bin": {
+    "astro-synthesia": "./bin/provision.mjs"
+  },
+  "files": [
+    "src",
+    "bin",
+    "env.d.ts"
+  ],
+  "keywords": [
+    "astro",
+    "astro-integration",
+    "synthesia",
+    "video",
+    "ai",
+    "mdx",
+    "embed"
+  ],
+  "peerDependencies": {
+    "astro": "^5.0.0 || ^6.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
