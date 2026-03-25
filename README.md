@@ -63,32 +63,39 @@ import SynthesiaVideo from 'astro-synthesia/SynthesiaVideo.astro';
 
 See the [Synthesia video creation API reference](https://docs.synthesia.io/reference/create-video) for the full set of supported options.
 
-## Provisioning videos
+## CLI
 
-Synthesia videos take a few minutes to generate. The provisioning step is separate from your site build — run it when you add or change a `<SynthesiaVideo>`, then commit the manifest.
+Synthesia videos take a few minutes to generate, so provisioning is separate from your site build. The CLI has three commands:
 
 ```bash
 # Set your API key
 export SYNTHESIA_API_KEY=your-api-key
 
-# Provision all videos found in your MDX content
+# 1. Provision — scan MDX and create new videos (returns immediately)
 npx astro-synthesia provision
 
-# Use --test for watermarked test videos (free)
-npx astro-synthesia provision --test
+# 2. Poll — wait for in-progress videos to finish
+npx astro-synthesia poll
 
-# Don't wait for completion (fire and forget)
-npx astro-synthesia provision --no-wait
+# 3. Status — check the state of all videos
+npx astro-synthesia status
 ```
 
-### CLI options
+Typical workflow:
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--manifest <path>` | `synthesia-manifest.json` | Path to manifest file |
-| `--content-dir <path>` | `src/content` | Directory to scan for MDX files |
-| `--test` | — | Create watermarked test videos |
-| `--no-wait` | — | Provision without waiting for completion |
+```bash
+npx astro-synthesia provision       # fires off API calls, exits fast
+npx astro-synthesia poll            # waits for all videos to complete
+git add synthesia-manifest.json && git commit -m "provision videos"
+```
+
+### Options
+
+| Flag | Applies to | Default | Description |
+|------|-----------|---------|-------------|
+| `--manifest <path>` | all | `synthesia-manifest.json` | Path to manifest file |
+| `--content-dir <path>` | `provision` | `src/content` | Directory to scan for MDX files |
+| `--test` | `provision` | — | Create watermarked test videos |
 
 ## How it works
 

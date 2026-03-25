@@ -11,13 +11,18 @@ import { join, resolve } from "node:path";
 const args = process.argv.slice(2);
 const command = args[0];
 
-if (command !== "provision") {
-  console.log("Usage: astro-synthesia provision [options]\n");
+const COMMANDS = ["provision", "poll", "status"];
+
+if (!COMMANDS.includes(command)) {
+  console.log("Usage: astro-synthesia <command> [options]\n");
+  console.log("Commands:");
+  console.log("  provision   Scan MDX files and create new videos via the Synthesia API");
+  console.log("  poll        Wait for in-progress videos to complete");
+  console.log("  status      Show the current state of all videos\n");
   console.log("Options:");
   console.log("  --manifest <path>      Manifest file (default: synthesia-manifest.json)");
   console.log("  --content-dir <path>   Content directory to scan (default: src/content)");
   console.log("  --test                 Create watermarked test videos");
-  console.log("  --no-wait              Provision without waiting for completion");
   process.exit(command === undefined || command === "--help" ? 0 : 1);
 }
 
@@ -36,7 +41,6 @@ const ROOT = process.cwd();
 const MANIFEST_PATH = resolve(ROOT, getFlagValue("--manifest", "synthesia-manifest.json"));
 const CONTENT_DIR = resolve(ROOT, getFlagValue("--content-dir", "src/content"));
 const TEST_MODE = getFlag("--test");
-const NO_WAIT = getFlag("--no-wait");
 const API_BASE = "https://api.synthesia.io/v2";
 
 // ---------------------------------------------------------------------------
@@ -155,64 +159,64 @@ function extractVideoUsages(content, filePath) {
 }
 
 // ---------------------------------------------------------------------------
-// Provision and poll
+// Poll a single video until terminal state
 // ---------------------------------------------------------------------------
 
-async function provisionVideo(config) {
-  const result = await apiRequest("POST", "/videos", {
-    title: config.title ?? "Blog Video",
-    visibility: "public",
-    test: TEST_MODE,
-    aspectRatio: config.aspectRatio,
-    input: [
-      {
-        scriptText: config.scriptText,
-        avatar: config.avatar,
-        background: config.background,
-      },
-    ],
-  });
-  return result.id;
-}
-
-async function pollVideo(id) {
+async function pollVideoUntilDone(hash, entry, manifest) {
   const TIMEOUT = 30 * 60 * 1000;
   const INTERVAL = 30_000;
   const start = Date.now();
+  const preview = entry.scriptPreview?.slice(0, 60) ?? entry.videoId;
 
   while (Date.now() - start < TIMEOUT) {
-    const video = await apiRequest("GET", `/videos/${id}`);
-    if (video.status === "complete") return video;
-    if (video.status === "error" || video.status === "rejected") {
-      throw new Error(`Video ${id} ended with status: ${video.status}`);
+    const video = await apiRequest("GET", `/videos/${entry.videoId}`);
+
+    if (video.status === "complete") {
+      manifest[hash] = {
+        ...entry,
+        status: "complete",
+        shareUrl: `https://share.synthesia.io/${entry.videoId}`,
+        thumbnailUrl: video.thumbnail?.image ?? null,
+        duration: video.duration ?? null,
+        completedAt: new Date().toISOString(),
+      };
+      console.log(`  DONE: "${preview}..." (${entry.videoId})`);
+      return "complete";
     }
+
+    if (video.status === "error" || video.status === "rejected") {
+      manifest[hash] = { ...entry, status: "error" };
+      console.error(`  FAILED: "${preview}..." — ${video.status}`);
+      return "error";
+    }
+
     const elapsed = Math.round((Date.now() - start) / 1000);
-    console.log(`    ... still processing (${elapsed}s elapsed)`);
+    console.log(`  WAIT: "${preview}..." (${elapsed}s elapsed)`);
     await new Promise((r) => setTimeout(r, INTERVAL));
   }
 
-  return apiRequest("GET", `/videos/${id}`);
+  console.warn(`  TIMEOUT: "${preview}..." — still in_progress after 30m`);
+  return "timeout";
 }
 
 // ---------------------------------------------------------------------------
-// Main
+// Commands
 // ---------------------------------------------------------------------------
 
-async function main() {
+async function cmdProvision() {
   console.log("astro-synthesia provision");
   console.log(`  Manifest: ${MANIFEST_PATH}`);
   console.log(`  Content:  ${CONTENT_DIR}`);
-  console.log(`  Mode:     ${TEST_MODE ? "test (watermarked)" : "production"}`);
-  console.log(`  Wait:     ${NO_WAIT ? "no" : "yes"}\n`);
+  console.log(`  Mode:     ${TEST_MODE ? "test (watermarked)" : "production"}\n`);
 
+  // Scan
   const mdxFiles = await collectMdxFiles(CONTENT_DIR);
   console.log(`Found ${mdxFiles.length} MDX file(s)`);
 
   const allUsages = [];
   for (const file of mdxFiles) {
     const content = await readFile(file, "utf-8");
-    const usages = extractVideoUsages(content, file);
-    allUsages.push(...usages);
+    allUsages.push(...extractVideoUsages(content, file));
   }
 
   if (allUsages.length === 0) {
@@ -223,105 +227,162 @@ async function main() {
   console.log(`Found ${allUsages.length} <SynthesiaVideo> usage(s)\n`);
   getApiKey();
 
+  // Diff against manifest and provision new videos
   const manifest = await readManifest();
-  let alreadyComplete = 0;
-  let newlyProvisioned = 0;
-  let polled = 0;
+  let skipped = 0;
+  let created = 0;
   let failed = 0;
+
+  const toProvision = [];
 
   for (const usage of allUsages) {
     const hash = computeHash(usage);
     const existing = manifest[hash];
-    const preview = usage.scriptText.slice(0, 80);
+    const preview = usage.scriptText.slice(0, 60);
 
     if (existing?.status === "complete") {
-      console.log(`  SKIP (complete): "${preview}..."`);
-      alreadyComplete++;
+      console.log(`  SKIP: "${preview}..." (already complete)`);
+      skipped++;
       continue;
     }
 
     if (existing?.status === "in_progress") {
-      console.log(`  POLL (in_progress): "${preview}..."`);
-      if (!NO_WAIT) {
-        try {
-          const video = await pollVideo(existing.videoId);
-          manifest[hash] = {
-            ...existing,
-            status: video.status,
-            shareUrl:
-              video.status === "complete"
-                ? `https://share.synthesia.io/${existing.videoId}`
-                : existing.shareUrl,
-            thumbnailUrl: video.thumbnail?.image ?? existing.thumbnailUrl,
-            duration: video.duration ?? existing.duration,
-            completedAt:
-              video.status === "complete" ? new Date().toISOString() : null,
-          };
-          polled++;
-        } catch (err) {
-          console.error(`  ERROR polling ${existing.videoId}: ${err.message}`);
-          manifest[hash] = { ...existing, status: "error" };
-          failed++;
-        }
-      }
+      console.log(`  SKIP: "${preview}..." (already in progress — run 'poll' to wait)`);
+      skipped++;
       continue;
     }
 
-    console.log(`  PROVISION: "${preview}..."`);
-    try {
-      const videoId = await provisionVideo(usage);
-      console.log(`    Created video ${videoId}`);
+    toProvision.push({ hash, usage, preview });
+  }
 
-      manifest[hash] = {
-        videoId,
-        status: "in_progress",
-        shareUrl: null,
-        thumbnailUrl: null,
-        duration: null,
-        scriptPreview: usage.scriptText.slice(0, 100),
-        avatar: usage.avatar,
-        provisionedAt: new Date().toISOString(),
-        completedAt: null,
-      };
-      newlyProvisioned++;
+  // Provision all new videos concurrently
+  if (toProvision.length > 0) {
+    console.log(`\nProvisioning ${toProvision.length} video(s)...`);
 
-      if (!NO_WAIT) {
-        try {
-          const video = await pollVideo(videoId);
-          manifest[hash].status = video.status;
-          if (video.status === "complete") {
-            manifest[hash].shareUrl = `https://share.synthesia.io/${videoId}`;
-            manifest[hash].thumbnailUrl = video.thumbnail?.image ?? null;
-            manifest[hash].duration = video.duration ?? null;
-            manifest[hash].completedAt = new Date().toISOString();
-          }
-        } catch (err) {
-          console.error(`  ERROR polling ${videoId}: ${err.message}`);
-          manifest[hash].status = "error";
-          failed++;
-        }
+    const results = await Promise.allSettled(
+      toProvision.map(async ({ hash, usage, preview }) => {
+        const result = await apiRequest("POST", "/videos", {
+          title: usage.title ?? "Blog Video",
+          visibility: "public",
+          test: TEST_MODE,
+          aspectRatio: usage.aspectRatio,
+          input: [
+            {
+              scriptText: usage.scriptText,
+              avatar: usage.avatar,
+              background: usage.background,
+            },
+          ],
+        });
+
+        manifest[hash] = {
+          videoId: result.id,
+          status: "in_progress",
+          shareUrl: null,
+          thumbnailUrl: null,
+          duration: null,
+          scriptPreview: usage.scriptText.slice(0, 100),
+          avatar: usage.avatar,
+          provisionedAt: new Date().toISOString(),
+          completedAt: null,
+        };
+
+        console.log(`  CREATED: "${preview}..." (${result.id})`);
+        return result.id;
+      }),
+    );
+
+    for (const r of results) {
+      if (r.status === "fulfilled") created++;
+      else {
+        console.error(`  ERROR: ${r.reason.message}`);
+        failed++;
       }
-    } catch (err) {
-      console.error(`  ERROR provisioning: ${err.message}`);
-      failed++;
     }
   }
 
   await writeManifestFile(manifest);
 
-  console.log("\nSummary:");
-  console.log(`  Already complete: ${alreadyComplete}`);
-  console.log(`  Newly provisioned: ${newlyProvisioned}`);
-  console.log(`  Polled to completion: ${polled}`);
-  console.log(`  Failed: ${failed}`);
+  console.log(`\nSummary: ${skipped} skipped, ${created} created, ${failed} failed`);
 
-  if (failed > 0) {
-    console.error("\nSome videos failed. Check errors above.");
-    process.exit(1);
+  if (created > 0) {
+    console.log("\nVideos are now processing. Run 'astro-synthesia poll' to wait for completion.");
   }
+
+  if (failed > 0) process.exit(1);
 }
 
-main().catch((err) => {
+async function cmdPoll() {
+  console.log("astro-synthesia poll");
+  console.log(`  Manifest: ${MANIFEST_PATH}\n`);
+  getApiKey();
+
+  const manifest = await readManifest();
+  const pending = Object.entries(manifest).filter(
+    ([, entry]) => entry.status === "in_progress",
+  );
+
+  if (pending.length === 0) {
+    console.log("No in-progress videos to poll.\n");
+    return;
+  }
+
+  console.log(`Polling ${pending.length} in-progress video(s)...\n`);
+
+  // Poll all concurrently
+  const results = await Promise.allSettled(
+    pending.map(([hash, entry]) => pollVideoUntilDone(hash, entry, manifest)),
+  );
+
+  await writeManifestFile(manifest);
+
+  const completed = results.filter(
+    (r) => r.status === "fulfilled" && r.value === "complete",
+  ).length;
+  const errored = results.filter(
+    (r) => r.status === "fulfilled" && r.value === "error",
+  ).length;
+  const timedOut = results.filter(
+    (r) => r.status === "fulfilled" && r.value === "timeout",
+  ).length;
+
+  console.log(`\nSummary: ${completed} complete, ${errored} failed, ${timedOut} timed out`);
+
+  if (errored > 0) process.exit(1);
+}
+
+async function cmdStatus() {
+  console.log("astro-synthesia status");
+  console.log(`  Manifest: ${MANIFEST_PATH}\n`);
+
+  const manifest = await readManifest();
+  const entries = Object.entries(manifest);
+
+  if (entries.length === 0) {
+    console.log("Manifest is empty. Run 'astro-synthesia provision' first.\n");
+    return;
+  }
+
+  const counts = { complete: 0, in_progress: 0, error: 0 };
+
+  for (const [, entry] of entries) {
+    const preview = entry.scriptPreview?.slice(0, 60) ?? "—";
+    const status = entry.status.toUpperCase().padEnd(12);
+    console.log(`  ${status} "${preview}..." (${entry.videoId})`);
+    counts[entry.status] = (counts[entry.status] ?? 0) + 1;
+  }
+
+  console.log(
+    `\n${entries.length} video(s): ${counts.complete} complete, ${counts.in_progress} in progress, ${counts.error} errored`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Run
+// ---------------------------------------------------------------------------
+
+const commands = { provision: cmdProvision, poll: cmdPoll, status: cmdStatus };
+commands[command]().catch((err) => {
   console.error(`\nFatal: ${err.message}`);
   process.exit(1);
 });
